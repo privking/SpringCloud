@@ -60,4 +60,137 @@ zuul:
   ignored-services: order-service
   # 匹配过滤
   ignored-patterns: /*-service/api/v1/order/save
+  # 默认网关不转发Cookie, Set-Cookie, Authorization
+  # private Set<String> sensitiveHeaders = new LinkedHashSet<>(
+  # 		Arrays.asList("Cookie", "Set-Cookie", "Authorization"));
+  sensitive-headers: 
 ```
+
+## 自定义Zuul过滤器
+1. 新建一个filter包
+2. 新建一个类，继承ZuulFilter，重写里面的方法
+3. 在类顶部加注解，`@Component`,让Spring扫描
+
+<img src="imgs/filters.png" width="900" height="600">
+
+```java
+/**
+检查含order的url是否有token的请求头或参数
+*/
+@Component
+public class LoginFilter extends ZuulFilter {
+	 /**
+     * 指定该Filter的类型
+     * ERROR_TYPE = "error";
+     * POST_TYPE = "post";
+     * PRE_TYPE = "pre";
+     * ROUTE_TYPE = "route";
+     */
+    @Override
+    public String filterType() {
+        return FilterConstants.PRE_TYPE;
+    }
+
+	/**
+     * 指定该Filter执行的顺序（Filter从小到大执行）
+     * DEBUG_FILTER_ORDER = 1;
+     * FORM_BODY_WRAPPER_FILTER_ORDER = -1;
+     * PRE_DECORATION_FILTER_ORDER = 5;
+     * RIBBON_ROUTING_FILTER_ORDER = 10;
+     * SEND_ERROR_FILTER_ORDER = 0;
+     * SEND_FORWARD_FILTER_ORDER = 500;
+     * SEND_RESPONSE_FILTER_ORDER = 1000;
+     * SIMPLE_HOST_ROUTING_FILTER_ORDER = 100;
+     * SERVLET_30_WRAPPER_FILTER_ORDER = -2;
+     * SERVLET_DETECTION_FILTER_ORDER = -3;
+     */
+    @Override
+    public int filterOrder() {
+        return 0;
+    }
+
+  	/**
+     * 指定需要执行该Filter的规则
+     * 返回true则执行run()
+     * 返回false则不执行run()
+     */
+    @Override
+    public boolean shouldFilter() {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        String uri = requestContext.getRequest().getRequestURI();
+        System.out.println(uri);
+        if(uri.contains("order")){
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public Object run() throws ZuulException {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        HttpServletRequest request = requestContext.getRequest();
+        String token = request.getHeader("token");
+        if(StringUtils.isBlank(token)){
+            token = request.getParameter("token");
+        }
+        if(StringUtils.isBlank(token)){
+            requestContext.setSendZuulResponse(false);
+            requestContext.setResponseStatusCode(HttpStatus.UNAUTHORIZED.value());
+        }
+        return null;
+    }
+}
+
+```
+
+```java
+/**
+ * 网关层限流限流
+ */
+@Component
+public class RateLimiteFilter extends ZuulFilter {
+	//guava
+    //com.google.common.util.concurrent.RateLimiter
+    private static final RateLimiter RATE_LIMITER = RateLimiter.create(1000);
+
+
+    @Override
+    public String filterType() {
+        return FilterConstants.PRE_TYPE;
+    }
+
+    @Override
+    public int filterOrder() {
+        return -4;
+    }
+
+    @Override
+    public boolean shouldFilter() {
+        RequestContext requestContext = RequestContext.getCurrentContext();
+        String uri = requestContext.getRequest().getRequestURI();
+        System.out.println(uri);
+        if(uri.contains("order")){
+            return true;
+        }
+
+
+        return false;
+    }
+
+    @Override
+    public Object run() throws ZuulException {
+        if(!RATE_LIMITER.tryAcquire()){
+            RequestContext requestContext = RequestContext.getCurrentContext();
+            requestContext.setSendZuulResponse(false);
+            requestContext.setResponseStatusCode(HttpStatus.TOO_MANY_REQUESTS.value());
+        }
+        return null;
+    }
+}
+```
+
+## 微服务网关Zull集群搭建
+### lvs+keepalived+nginx高性能负载均衡集群
+* LVS是一个开源的软件，可以实现传输层四层负载均衡。LVS是Linux Virtual Server的缩写，意思是Linux虚拟服务器。目前有三种IP负载均衡技术（VS/NAT、VS/TUN和VS/DR）；八种调度算法（rr,wrr,lc,wlc,lblc,lblcr,dh,sh）。
+Keepalived作用
+* LVS可以实现负载均衡，但是不能够进行健康检查，比如一个rs出现故障，LVS 仍然会把请求转发给故障的rs服务器，这样就会导致请求的无效性。keepalive 软件可以进行健康检查，而且能同时实现 LVS 的高可用性，解决 LVS 单点故障的问题，其实 keepalive 就是为 LVS 而生的。
